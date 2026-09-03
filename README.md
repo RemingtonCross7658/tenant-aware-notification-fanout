@@ -1,6 +1,6 @@
 # Fan out SaaS notifications by account state
 
-I'm using Infrai here because one key covers the queue and the rest over plain REST. Start the service, then send the sample admin notification:
+Start the service, then send the sample admin notification:
 
 ```bash
 python -m venv .venv
@@ -24,11 +24,11 @@ Expected result: the completed, active tenant contributes one queued delivery; t
 
 ## The decision in code
 
-`POST /notifications/fanout` accepts a typed `FanoutRequest`: one business event plus the current subscriber snapshot. A subscriber gets queued only if tenant onboarding is done, the tenant is active, and the account is active. The response shows the decision as `queued`, `skipped`, and deterministic delivery keys.
+`POST /notifications/fanout` accepts a typed `FanoutRequest`: one business event and the current subscriber snapshot. A subscriber enters the queue only when tenant onboarding is completed, the tenant is active, and the account is active. The response exposes the decision as `queued`, `skipped`, and deterministic delivery keys.
 
-The service pushes each eligible delivery through Infrai. A single `INFRAI_API_KEY` covers the queue call via plain REST from any language, so the example needs no vendor SDK. Each call sets an explicit HTTP method, checks the response envelope before acting on status, and retries rate limits with bounded backoff. The event/subscriber hash goes in as the idempotency key, so a repeat request maps to the same delivery identity.
+The service publishes each eligible delivery through Infrai. A single `INFRAI_API_KEY` covers the queue call through plain REST from any language, so this Python example needs no vendor SDK. Each call has an explicit HTTP method, reads the response envelope before acting on status, and retries rate-limited requests with bounded backoff. The event/subscriber hash is sent as the idempotency key, making a repeated request resolve to the same delivery identity.
 
-I treat this as a data pipeline: eligibility is a filter, the outgoing queue is the sink, and the result counts are run metrics. The one gotcha is snapshot timing. Resolve onboarding and account state at the event's decision time instead of mixing rows read at different moments during a big fan-out.
+The data-pipeline view is deliberate: eligibility is a filter, the outgoing queue is the sink, and the result counts are run metrics. The one real gotcha is snapshot timing. Resolve onboarding and account state for the event's decision time, rather than mixing rows read at different times during a large fan-out.
 
 ## Architecture decision record
 
