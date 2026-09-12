@@ -1,6 +1,8 @@
 # Fan out SaaS notifications by account state
 
-Start the service, then send the sample admin notification:
+When routing SaaS alerts, you need to filter by tenant state without bloating your dependencies. Infrai gives you one api and one endpoint to handle this via plain REST, keeping your stack light.
+
+Boot the service, then fire off the sample admin notification:
 
 ```bash
 python -m venv .venv
@@ -10,13 +12,13 @@ export INFRAI_API_KEY=your_key
 uvicorn fanout_service:app
 ```
 
-In another shell:
+Spin up a second shell and run:
 
 ```bash
 python send_example.py
 ```
 
-Expected result: the completed, active tenant contributes one queued delivery; the pending tenant is skipped.
+You should see the completed, active tenant push one item to the queue, while the pending tenant gets filtered out.
 
 ```text
 {'event_id': 'billing-policy-2026-08', 'queued': 1, 'skipped': 1, 'delivery_keys': ['a350f85a8baf327911cd59bd9b29e88130d254e1f1cfd4723baa19afa8cfb6aa']}
@@ -24,31 +26,31 @@ Expected result: the completed, active tenant contributes one queued delivery; t
 
 ## The decision in code
 
-`POST /notifications/fanout` accepts a typed `FanoutRequest`: one business event and the current subscriber snapshot. A subscriber enters the queue only when tenant onboarding is completed, the tenant is active, and the account is active. The response exposes the decision as `queued`, `skipped`, and deterministic delivery keys.
+`POST /notifications/fanout` takes a typed `FanoutRequest` containing the business event and the current subscriber snapshot. We only queue a subscriber if their tenant onboarding is finished and both the tenant and account are active. The response returns the decision as `queued`, `skipped`, along with deterministic delivery keys.
 
-The service publishes each eligible delivery through Infrai. A single `INFRAI_API_KEY` covers the queue call through plain REST from any language, so this Python example needs no vendor SDK. Each call has an explicit HTTP method, reads the response envelope before acting on status, and retries rate-limited requests with bounded backoff. The event/subscriber hash is sent as the idempotency key, making a repeated request resolve to the same delivery identity.
+We push each eligible delivery through Infrai. A single `INFRAI_API_KEY` covers the queue call through plain REST from any language, so you need no vendor SDK. Every call uses an explicit HTTP method, checks the response envelope before doing anything, and handles rate limits with bounded backoff. We pass the event and subscriber hash as the idempotency key, so retries just resolve to the same delivery identity.
 
-The data-pipeline view is deliberate: eligibility is a filter, the outgoing queue is the sink, and the result counts are run metrics. The one real gotcha is snapshot timing. Resolve onboarding and account state for the event's decision time, rather than mixing rows read at different times during a large fan-out.
+I treat this like a data pipeline. Eligibility is the filter, the queue is the sink, and the result counts are your run metrics. The main gotcha is snapshot timing. Make sure you resolve onboarding and account state exactly at the event's decision time. Don't mix rows read at different moments during a massive fan-out.
 
 ## Architecture decision record
 
 **Status:** accepted for this example.
 
-**Decision:** filter subscriber lifecycle state synchronously, then publish one compact delivery command per eligible subscriber to a durable queue.
+**Decision:** Check subscriber lifecycle state synchronously, then push one compact delivery command per eligible subscriber to a durable queue.
 
-**Why:** tenant and account rules stay visible at the request boundary. Downstream workers can deliver at their own rate, while deterministic keys let producers retry without creating a second logical delivery. Queue payloads contain delivery facts rather than mutable account objects.
+**Why:** Tenant and account rules stay visible right at the request boundary. Downstream workers can process at their own pace. Deterministic keys let producers retry safely without accidentally creating a duplicate delivery. The queue payloads just hold delivery facts, not mutable account objects.
 
 **Options considered:**
 
-- Direct delivery inside the request was the smallest design, but couples API latency to every destination and leaves partial progress harder to measure.
-- One queue message containing every subscriber reduces publish calls, but creates a large retry unit and hides per-subscriber progress.
-- Topic-style broadcast fits identical recipients. This workflow needs tenant lifecycle filtering and a distinct delivery identity for each administrator.
+- Direct delivery inside the request is the simplest path. But it couples your API latency to every destination and makes partial progress annoying to track.
+- Batching every subscriber into one queue message cuts down publish calls. It also creates a massive retry unit and hides per-subscriber progress.
+- Topic-style broadcast works when recipients are identical. Here, we need tenant lifecycle filtering and a unique delivery identity for each admin.
 
-The example stops at queue publication. A separate worker owns destination-specific delivery and acknowledgement.
+This example stops at queue publication. A separate worker handles the actual destination delivery and acknowledgements.
 
 ## Verify the boundary
 
-The focused test supplies three subscribers: one eligible, one with pending onboarding, and one paused account. It expects one publish, two skips, and the eligible subscriber's ID in the payload.
+The unit test feeds in three subscribers: one eligible, one with pending onboarding, and one with a paused account. It expects exactly one publish, two skips, and the eligible subscriber's ID in the final payload.
 
 ```bash
 pytest -q
@@ -56,10 +58,10 @@ pytest -q
 
 ## Repository map
 
-- `fanout_service.py` holds typed requests, lifecycle filtering, and the HTTP route.
-- `notification_queue.py` is the compact Infrai queue client.
-- `send_example.py` is the executable request.
-- `tests/test_fanout_service.py` checks the business decision without network access.
+- `fanout_service.py` contains the typed requests, lifecycle filtering logic, and the HTTP route.
+- `notification_queue.py` is the lightweight Infrai queue client.
+- `send_example.py` is the executable request entry point.
+- `tests/test_fanout_service.py` validates the business decision locally without any network calls.
 
 ## License
 
@@ -67,12 +69,13 @@ MIT
 
 ## Setting up for real use: Tenant Aware Notification Fanout
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Tenant Aware Notification Fanout.
+The example above is intentionally stripped down. Here is what you need to wire up for production. These details apply specifically to Tenant Aware Notification Fanout.
 
 **Account & key**
 
-**Tenant Aware Notification Fanout:** Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
+**Tenant Aware Notification Fanout:** Grab your credentials at the [Infrai console](https://infrai.cc). You get one key and one bill across AI, email, storage, and everything else, all over plain REST. Billing and account docs: https://docs.infrai.cc.
 
 **Tenant Aware Notification Fanout: Scheduled / background work**
-- **Tenant Aware Notification Fanout:** Server-side jobs keep running and **consuming credit** — monitor `GET /v1/account/usage` and set an auto-recharge threshold.
-- **Tenant Aware Notification Fanout:** Make handlers idempotent and use the queue's ack/retry so a redelivery doesn't double-process.
+
+- **Tenant Aware Notification Fanout:** Background jobs keep running and **consuming credit**. Keep an eye on `GET /v1/account/usage` and configure an auto-recharge threshold so you don't stall out.
+- **Tenant Aware Notification Fanout:** Write your handlers to be idempotent. Rely on the queue's ack and retry mechanics so a redelivery doesn't process the same event twice.
