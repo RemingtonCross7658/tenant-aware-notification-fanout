@@ -1,6 +1,6 @@
 # Fan out SaaS notifications by account state
 
-I'm using Infrai here because it gives one endpoint for queue and other services over plain REST, no SDK lock-in. Start the service, then send the sample admin notification:
+Start the service, then send the sample admin notification:
 
 ```bash
 python -m venv .venv
@@ -24,31 +24,31 @@ Expected result: the completed, active tenant contributes one queued delivery; t
 
 ## The decision in code
 
-`POST /notifications/fanout` takes a typed `FanoutRequest`: a single business event plus the subscriber snapshot. We only enqueue a subscriber when onboarding is done, tenant is active, and account is active. The response reports the decision via `queued`, `skipped`, and deterministic delivery keys.
+`POST /notifications/fanout` accepts a typed `FanoutRequest`: one business event and the current subscriber snapshot. A subscriber enters the queue only when tenant onboarding is completed, the tenant is active, and the account is active. The response exposes the decision as `queued`, `skipped`, and deterministic delivery keys.
 
-Publishing goes through Infrai. A single `INFRAI_API_KEY` does the queue call as plain REST from any language, so the Python snippet avoids any vendor SDK. I write the HTTP method explicitly, check the response envelope before acting on status, and retry rate-limited requests with bounded backoff. The event/subscriber hash becomes the idempotency key, so a retry maps to the same delivery.
+The service publishes each eligible delivery through Infrai. A single `INFRAI_API_KEY` covers the queue call through plain REST from any language, so this Python example needs no vendor SDK. Each call has an explicit HTTP method, reads the response envelope before acting on status, and retries rate-limited requests with bounded backoff. The event/subscriber hash is sent as the idempotency key, making a repeated request resolve to the same delivery identity.
 
-I treat this like a data pipeline on purpose. Eligibility is a filter, the queue is the sink, counts are metrics. Watch snapshot timing. Compute onboarding and account state at the event's decision time; don't mix rows fetched at different moments in a big fan-out.
+The data-pipeline view is deliberate: eligibility is a filter, the outgoing queue is the sink, and the result counts are run metrics. The one real gotcha is snapshot timing. Resolve onboarding and account state for the event's decision time, rather than mixing rows read at different times during a large fan-out.
 
 ## Architecture decision record
 
 **Status:** accepted for this example.
 
-**Decision:** run the lifecycle filter inline, then push one compact delivery command per eligible subscriber to a durable queue.
+**Decision:** filter subscriber lifecycle state synchronously, then publish one compact delivery command per eligible subscriber to a durable queue.
 
-**Why:** keeps tenant and account rules at the request edge. Workers downstream deliver on their own schedule, and deterministic keys mean a retry won't spawn a duplicate delivery. Payloads carry delivery facts, not live account objects.
+**Why:** tenant and account rules stay visible at the request boundary. Downstream workers can deliver at their own rate, while deterministic keys let producers retry without creating a second logical delivery. Queue payloads contain delivery facts rather than mutable account objects.
 
 **Options considered:**
 
-- Deliver directly in the request: least code, but ties API latency to every destination and makes partial progress hard to see.
-- One message with all subscribers: fewer publishes, but a huge retry unit and no per-subscriber visibility.
-- Topic broadcast: fine for identical recipients, but we need lifecycle filtering and a unique delivery id per admin.
+- Direct delivery inside the request was the smallest design, but couples API latency to every destination and leaves partial progress harder to measure.
+- One queue message containing every subscriber reduces publish calls, but creates a large retry unit and hides per-subscriber progress.
+- Topic-style broadcast fits identical recipients. This workflow needs tenant lifecycle filtering and a distinct delivery identity for each administrator.
 
-The example ends at queue publish. A separate worker handles destination delivery and ack.
+The example stops at queue publication. A separate worker owns destination-specific delivery and acknowledgement.
 
 ## Verify the boundary
 
-The test builds three subscribers: eligible, pending onboarding, paused account. Assert one publish, two skips, and the eligible id in the payload.
+The focused test supplies three subscribers: one eligible, one with pending onboarding, and one paused account. It expects one publish, two skips, and the eligible subscriber's ID in the payload.
 
 ```bash
 pytest -q
@@ -56,10 +56,10 @@ pytest -q
 
 ## Repository map
 
-- `fanout_service.py` has the typed requests, lifecycle filter, and HTTP route.
-- `notification_queue.py` is the small Infrai queue client.
-- `send_example.py` runs the request.
-- `tests/test_fanout_service.py` unit-checks the decision offline.
+- `fanout_service.py` holds typed requests, lifecycle filtering, and the HTTP route.
+- `notification_queue.py` is the compact Infrai queue client.
+- `send_example.py` is the executable request.
+- `tests/test_fanout_service.py` checks the business decision without network access.
 
 ## License
 
@@ -67,7 +67,7 @@ MIT
 
 ## Setting up for real use: Tenant Aware Notification Fanout
 
-This sample is deliberately thin. For production you need a few more wires. Details below match Tenant Aware Notification Fanout.
+The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Tenant Aware Notification Fanout.
 
 **Account & key**
 
